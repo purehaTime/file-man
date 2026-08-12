@@ -1,0 +1,18 @@
+#!/usr/bin/env xdg-open
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=File Manager
+Name[ru]=Файловый менеджер
+GenericName=File Manager
+GenericName[ru]=Файловый менеджер
+Comment=Lightweight Wayland file manager without GTK/Qt
+Comment[ru]=Лёгкий файловый менеджер для Wayland без GTK и Qt
+Exec=file-man %u
+Icon=system-file-manager
+Terminal=false
+Categories=System;FileTools;FileManager;Utility;
+MimeType=inode/directory;
+Keywords=files;folders;browser;
+Keywords[ru]=файлы;папки;проводник;
+StartupNotify=true
