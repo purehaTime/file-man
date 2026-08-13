@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::daemon::{Control, Registry};
-use crate::ipc::{Conflict, JobState, Op};
+use crate::ipc::{Conflict, JobState, Naming, Op};
 
 /// Размер буфера при обычном чтении/записи.
 const BUF_SIZE: usize = 1 << 20; // 1 МиБ
@@ -57,6 +57,7 @@ pub fn run(
     sources: Vec<PathBuf>,
     dest: PathBuf,
     conflict: Conflict,
+    naming: Naming,
 ) {
     // Фаза 1 — обход дерева.
     let mut stats = Vec::with_capacity(sources.len());
@@ -99,9 +100,7 @@ pub fn run(
             cancelled = true;
             break;
         }
-        let errors_before = progress.errors.len();
-
-        match transfer_root(src, &dest, op, conflict, &stat, &mut progress, &ctl) {
+        match transfer_root(src, &dest, op, conflict, &naming, &stat, &mut progress, &ctl) {
             Ok(()) => {}
             Err(Error::Cancelled) => {
                 cancelled = true;
@@ -109,13 +108,6 @@ pub fn run(
             }
             Err(Error::Io(err)) => {
                 progress.error(format!("{}: {err}", src.display()));
-            }
-        }
-
-        // Источник удаляем только если весь его подкаталог перенесён без ошибок.
-        if op == Op::Move && progress.errors.len() == errors_before {
-            if let Err(err) = remove_path(src) {
-                progress.error(format!("не удалось удалить {}: {err}", src.display()));
             }
         }
     }
@@ -185,6 +177,7 @@ fn transfer_root(
     dest_dir: &Path,
     op: Op,
     conflict: Conflict,
+    naming: &Naming,
     stat: &Stat,
     progress: &mut Progress,
     ctl: &Control,
@@ -198,17 +191,25 @@ fn transfer_root(
 
     let naive_target = dest_dir.join(name);
 
-    if is_inside(src, &naive_target) {
+    // Перемещение объекта в его же папку — ничего делать не нужно.
+    if op == Op::Move && same_path(src, &naive_target) {
+        progress.jump(*stat);
+        return Ok(());
+    }
+
+    let Some(target) = resolve_conflict(&naive_target, conflict, naming) else {
+        progress.jump(*stat);
+        return Ok(());
+    };
+
+    // Копировать каталог внутрь себя нельзя, а рядом с собой — можно:
+    // конфликт имён уже разрешён, и «папка (1)» лежит вне исходной.
+    if is_inside_dir(src, &target) {
         return Err(Error::Io(io::Error::new(
             io::ErrorKind::InvalidInput,
             "нельзя поместить каталог внутрь самого себя",
         )));
     }
-
-    let Some(target) = resolve_conflict(&naive_target, conflict) else {
-        progress.jump(*stat);
-        return Ok(());
-    };
 
     if op == Op::Move {
         match fs::rename(src, &target) {
@@ -232,13 +233,25 @@ fn transfer_root(
         }
     }
 
-    transfer(src, &target, conflict, progress, ctl)
+    let errors_before = progress.errors.len();
+    transfer(src, &target, conflict, naming, progress, ctl)?;
+
+    // При перемещении источник убираем сами и только если перенеслось всё:
+    // после успешного `rename` выше удалять уже нечего.
+    if op == Op::Move && progress.errors.len() == errors_before {
+        if let Err(err) = remove_path(src) {
+            progress.error(format!("не удалось удалить {}: {err}", src.display()));
+        }
+    }
+
+    Ok(())
 }
 
 fn transfer(
     src: &Path,
     target: &Path,
     conflict: Conflict,
+    naming: &Naming,
     progress: &mut Progress,
     ctl: &Control,
 ) -> Result<()> {
@@ -281,12 +294,12 @@ fn transfer(
 
             let child = entry.path();
             let naive = target.join(entry.file_name());
-            let Some(child_target) = resolve_conflict(&naive, conflict) else {
+            let Some(child_target) = resolve_conflict(&naive, conflict, naming) else {
                 progress.jump(scan(&child, ctl));
                 continue;
             };
 
-            match transfer(&child, &child_target, conflict, progress, ctl) {
+            match transfer(&child, &child_target, conflict, naming, progress, ctl) {
                 Ok(()) => {}
                 Err(Error::Cancelled) => return Err(Error::Cancelled),
                 Err(Error::Io(err)) => {
@@ -439,19 +452,20 @@ fn remove_path(path: &Path) -> io::Result<()> {
 
 /// Куда на самом деле писать с учётом политики конфликтов.
 /// `None` — файл нужно пропустить.
-fn resolve_conflict(target: &Path, conflict: Conflict) -> Option<PathBuf> {
+fn resolve_conflict(target: &Path, conflict: Conflict, naming: &Naming) -> Option<PathBuf> {
     if !exists(target) {
         return Some(target.to_path_buf());
     }
     match conflict {
         Conflict::Overwrite => Some(target.to_path_buf()),
         Conflict::Skip => None,
-        Conflict::Rename => Some(unique_path(target)),
+        Conflict::Rename => Some(unique_path(target, naming)),
     }
 }
 
-/// `foo.txt` → `foo (2).txt`, `foo (3).txt`, …
-pub fn unique_path(target: &Path) -> PathBuf {
+/// По умолчанию `foo.txt` → `foo (1).txt`, `foo (2).txt`, …
+/// Шаблон и начальный номер настраиваются в конфиге.
+pub fn unique_path(target: &Path, naming: &Naming) -> PathBuf {
     if !exists(target) {
         return target.to_path_buf();
     }
@@ -473,8 +487,9 @@ pub fn unique_path(target: &Path) -> PathBuf {
         _ => (name.to_string(), String::new()),
     };
 
-    for n in 2..10_000u32 {
-        let candidate = parent.join(format!("{stem} ({n}){ext}"));
+    let start = naming.start.max(1);
+    for n in start..start.saturating_add(10_000) {
+        let candidate = parent.join(naming.render(&stem, n, &ext));
         if !exists(&candidate) {
             return candidate;
         }
@@ -483,15 +498,33 @@ pub fn unique_path(target: &Path) -> PathBuf {
     parent.join(format!("{stem} ({}){ext}", std::process::id()))
 }
 
-/// Лежит ли `target` внутри `src` (защита от копирования папки в себя).
-fn is_inside(src: &Path, target: &Path) -> bool {
-    let src = fs::canonicalize(src).unwrap_or_else(|_| src.to_path_buf());
-    let target = target
-        .parent()
-        .and_then(|p| fs::canonicalize(p).ok())
-        .map(|p| p.join(target.file_name().unwrap_or_default()))
-        .unwrap_or_else(|| target.to_path_buf());
-    target.starts_with(&src)
+/// Один и тот же объект (с учётом симлинков в пути).
+fn same_path(a: &Path, b: &Path) -> bool {
+    absolute(a) == absolute(b)
+}
+
+/// Лежит ли `target` внутри каталога `src` — защита от копирования папки в себя.
+/// Для файлов всегда `false`: файл можно копировать рядом с собой.
+fn is_inside_dir(src: &Path, target: &Path) -> bool {
+    if !src.is_dir() {
+        return false;
+    }
+    absolute(target).starts_with(absolute(src))
+}
+
+/// Путь с разрешёнными симлинками; для несуществующего объекта разрешается
+/// только родительский каталог.
+fn absolute(path: &Path) -> PathBuf {
+    if let Ok(resolved) = fs::canonicalize(path) {
+        return resolved;
+    }
+    match (path.parent(), path.file_name()) {
+        (Some(parent), Some(name)) => match fs::canonicalize(parent) {
+            Ok(parent) => parent.join(name),
+            Err(_) => path.to_path_buf(),
+        },
+        _ => path.to_path_buf(),
+    }
 }
 
 fn set_times(path: &Path, meta: &Metadata) -> io::Result<()> {

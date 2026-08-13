@@ -14,7 +14,7 @@ use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::ipc::{self, Conflict, Job, JobState, Op, Request, Response};
+use crate::ipc::{self, Conflict, Job, JobState, Naming, Op, Request, Response};
 
 /// Флаги управления одной задачей, которые читает движок между чанками.
 pub struct Control {
@@ -151,6 +151,7 @@ impl Registry {
         sources: Vec<PathBuf>,
         dest: PathBuf,
         conflict: Conflict,
+        naming: Naming,
     ) -> u64 {
         let id = self.next_job.fetch_add(1, Ordering::Relaxed);
         let ctl = Arc::new(Control::new());
@@ -185,7 +186,7 @@ impl Registry {
             // Обход дерева рекурсивный, запас стека на очень глубокие каталоги.
             .stack_size(8 << 20)
             .spawn(move || {
-                super::engine::run(registry, id, ctl, op, sources, dest, conflict);
+                super::engine::run(registry, id, ctl, op, sources, dest, conflict, naming);
             })
             .expect("не удалось создать поток задачи");
 
@@ -379,6 +380,7 @@ fn handle_client(stream: UnixStream, registry: Arc<Registry>) {
                 sources,
                 dest,
                 conflict,
+                naming,
             } => {
                 if sources.is_empty() {
                     tx.send(Response::Error {
@@ -386,7 +388,7 @@ fn handle_client(stream: UnixStream, registry: Arc<Registry>) {
                     })
                     .is_ok()
                 } else {
-                    let id = registry.submit(op, sources, dest, conflict);
+                    let id = registry.submit(op, sources, dest, conflict, naming);
                     tx.send(Response::Accepted { id }).is_ok()
                 }
             }

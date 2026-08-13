@@ -5,20 +5,17 @@ use iced::{Center, Element, Fill, Length, Right};
 
 use super::{icons, style, App, Message, LIST_ID, ROW_HEIGHT};
 use crate::config::ViewMode;
-use crate::fsops::entry::{format_size, format_time};
+use crate::fsops::entry::format_time;
 use crate::fsops::{Entry, SortKey};
+use crate::i18n::S;
 
 pub fn view(app: &App) -> Element<'_, Message> {
     let content: Element<'_, Message> = if let Some(error) = &app.read_error {
-        notice(icons::ALERT, "Каталог недоступен", error)
+        notice(icons::ALERT, app.t(S::DirUnavailable), error)
     } else if app.entries.is_empty() && !app.loading {
-        notice(icons::FOLDER, "Здесь пусто", "В этой папке нет файлов")
+        notice(icons::FOLDER, app.t(S::EmptyTitle), app.t(S::EmptyHint))
     } else if app.filtered.is_empty() && !app.filter.is_empty() {
-        notice(
-            icons::SEARCH,
-            "Ничего не найдено",
-            "Измените условие фильтра",
-        )
+        notice(icons::SEARCH, app.t(S::NoMatchTitle), app.t(S::NoMatchHint))
     } else {
         let list = match app.config.view {
             ViewMode::Details => details(app),
@@ -77,7 +74,7 @@ fn details_header(app: &App) -> Element<'_, Message> {
 fn sort_button(app: &App, key: SortKey, width: Length) -> Element<'_, Message> {
     let active = app.config.sort_key == key;
 
-    let mut label = row![text(key.label()).size(12).style(if active {
+    let mut label = row![text(app.t(key.label())).size(12).style(if active {
         style::accent_text
     } else {
         style::muted
@@ -116,13 +113,13 @@ fn details(app: &App) -> Element<'_, Message> {
             text(if entry.is_dir {
                 String::new()
             } else {
-                format_size(entry.size)
+                app.lang().size(entry.size)
             })
             .size(12)
             .width(Length::Fixed(96.0))
             .align_x(Right)
             .style(style::muted),
-            text(entry.kind.label())
+            text(app.t(entry.kind.label()))
                 .size(12)
                 .width(Length::Fixed(128.0))
                 .style(style::muted),

@@ -4,8 +4,8 @@ use iced::widget::{button, container, progress_bar, row, space, text, tooltip};
 use iced::{Center, Element, Fill, Length};
 
 use super::{icons, style, App, Message};
-use crate::fsops::entry::{format_duration, format_size};
-use crate::ipc::{Job, JobState};
+use crate::i18n::S;
+use crate::ipc::{Job, JobState, Op};
 
 pub fn view(app: &App) -> Element<'_, Message> {
     let bar = row![summary(app), space().width(Fill), jobs(app)]
@@ -22,6 +22,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
 
 /// Что сейчас в каталоге и сколько выделено.
 fn summary(app: &App) -> Element<'_, Message> {
+    let lang = app.lang();
     let total = app.filtered.len();
     let dirs = app
         .visible_entries()
@@ -31,16 +32,13 @@ fn summary(app: &App) -> Element<'_, Message> {
 
     let mut parts = Vec::new();
     if dirs > 0 {
-        parts.push(format!("{dirs} {}", plural(dirs, "папка", "папки", "папок")));
+        parts.push(lang.folders(dirs));
     }
     if files > 0 {
-        parts.push(format!(
-            "{files} {}",
-            plural(files, "файл", "файла", "файлов")
-        ));
+        parts.push(lang.files(files));
     }
     if parts.is_empty() {
-        parts.push("пусто".into());
+        parts.push(app.t(S::StatusEmpty).to_string());
     }
 
     let mut line = row![text(parts.join(", ")).size(12).style(style::muted)]
@@ -55,22 +53,17 @@ fn summary(app: &App) -> Element<'_, Message> {
 
     if !selected.is_empty() {
         let bytes: u64 = selected.iter().filter(|e| !e.is_dir).map(|e| e.size).sum();
-        let label = if bytes > 0 {
-            format!(
-                "выбрано {} ({})",
-                selected.len(),
-                format_size(bytes)
-            )
-        } else {
-            format!("выбрано {}", selected.len())
-        };
-        line = line.push(text(label).size(12).style(style::accent_text));
+        line = line.push(
+            text(lang.selected(selected.len(), bytes))
+                .size(12)
+                .style(style::accent_text),
+        );
     }
 
     if let Some((free, total_bytes)) = app.usage {
         if total_bytes > 0 {
             line = line.push(
-                text(format!("· свободно {}", format_size(free)))
+                text(lang.free_space_inline(free))
                     .size(12)
                     .style(style::muted),
             );
@@ -78,7 +71,11 @@ fn summary(app: &App) -> Element<'_, Message> {
     }
 
     if app.loading {
-        line = line.push(text("· обновление…").size(12).style(style::muted));
+        line = line.push(
+            text(format!("· {}", app.t(S::Loading)))
+                .size(12)
+                .style(style::muted),
+        );
     }
 
     line.into()
@@ -92,7 +89,7 @@ fn jobs(app: &App) -> Element<'_, Message> {
 
     if let Some(job) = active.first() {
         let mut line = row![
-            text(job.title())
+            text(job_title(app, job))
                 .size(12)
                 .wrapping(text::Wrapping::None),
             progress_bar(0.0..=1.0, job.fraction())
@@ -109,7 +106,7 @@ fn jobs(app: &App) -> Element<'_, Message> {
                         },
                     }
                 }),
-            text(details(job)).size(12).style(style::muted),
+            text(details(app, job)).size(12).style(style::muted),
         ]
         .spacing(10)
         .align_y(Center);
@@ -124,14 +121,16 @@ fn jobs(app: &App) -> Element<'_, Message> {
         }
 
         let toggle = if job.state == JobState::Paused {
-            small(icons::PLAY, "Продолжить", Message::ResumeJob(job.id))
+            small(icons::PLAY, app.t(S::Resume), Message::ResumeJob(job.id))
         } else {
-            small(icons::PAUSE, "Пауза", Message::PauseJob(job.id))
+            small(icons::PAUSE, app.t(S::Pause), Message::PauseJob(job.id))
         };
 
-        line = line
-            .push(toggle)
-            .push(small(icons::CLOSE, "Отменить", Message::CancelJob(job.id)));
+        line = line.push(toggle).push(small(
+            icons::CLOSE,
+            app.t(S::Cancel),
+            Message::CancelJob(job.id),
+        ));
 
         return line.align_y(Center).into();
     }
@@ -139,21 +138,21 @@ fn jobs(app: &App) -> Element<'_, Message> {
     if finished > 0 {
         let last = app.jobs.last();
         let (icon, label) = match last.map(|job| &job.state) {
-            Some(JobState::Failed(_)) => (icons::ALERT, "Задача завершилась с ошибкой"),
-            Some(JobState::Cancelled) => (icons::INFO, "Задача отменена"),
-            _ => (icons::CHECK, "Копирование завершено"),
+            Some(JobState::Failed(_)) => (icons::ALERT, S::JobFailedNotice),
+            Some(JobState::Cancelled) => (icons::INFO, S::JobCancelNotice),
+            _ => (icons::CHECK, S::JobDoneNotice),
         };
 
         return row![
             button(
-                row![icons::view(icon, 14), text(label).size(12)]
+                row![icons::view(icon, 14), text(app.t(label)).size(12)]
                     .spacing(6)
                     .align_y(Center)
             )
             .padding([2, 6])
             .style(style::crumb)
             .on_press(Message::ShowJobs),
-            small(icons::CLOSE, "Скрыть", Message::DismissFinished),
+            small(icons::CLOSE, app.t(S::Hide), Message::DismissFinished),
         ]
         .spacing(6)
         .align_y(Center)
@@ -163,9 +162,7 @@ fn jobs(app: &App) -> Element<'_, Message> {
     if !app.daemon_online {
         return row![
             icons::view(icons::ALERT, 13),
-            text("служба копирования недоступна")
-                .size(12)
-                .style(style::muted),
+            text(app.t(S::DaemonOffline)).size(12).style(style::muted),
         ]
         .spacing(6)
         .align_y(Center)
@@ -175,21 +172,50 @@ fn jobs(app: &App) -> Element<'_, Message> {
     space().width(Length::Fixed(0.0)).into()
 }
 
-fn details(job: &Job) -> String {
+/// «Copying “big” → dst» / «Копирование «big» → dst».
+pub fn job_title(app: &App, job: &Job) -> String {
+    let verb = app.t(match job.op {
+        Op::Copy => S::OpCopy,
+        Op::Move => S::OpMove,
+    });
+    let dest = job.dest_name();
+
+    match job.sources.len() {
+        1 => match app.lang() {
+            crate::i18n::Lang::En => format!("{verb} “{}” → {dest}", job.source_name()),
+            crate::i18n::Lang::Ru => format!("{verb} «{}» → {dest}", job.source_name()),
+        },
+        n => format!("{verb} {} → {dest}", app.lang().items(n as u64)),
+    }
+}
+
+/// Ключ подписи состояния задачи.
+pub fn state_label(state: &JobState) -> S {
+    match state {
+        JobState::Scanning => S::JobScanning,
+        JobState::Running => S::JobRunning,
+        JobState::Paused => S::JobPaused,
+        JobState::Done => S::JobDone,
+        JobState::Cancelled => S::JobCancelled,
+        JobState::Failed(_) => S::JobFailed,
+    }
+}
+
+fn details(app: &App, job: &Job) -> String {
+    let lang = app.lang();
+
     match &job.state {
-        JobState::Scanning => "подсчёт объёма…".into(),
-        JobState::Paused => "пауза".into(),
         JobState::Running => {
             let mut parts = vec![format!("{:.0}%", job.fraction() * 100.0)];
             if job.speed > 0 {
-                parts.push(format!("{}/с", format_size(job.speed)));
+                parts.push(lang.speed(job.speed));
             }
             if let Some(eta) = job.eta {
-                parts.push(format!("осталось {}", format_duration(eta)));
+                parts.push(lang.eta(eta));
             }
             parts.join(" · ")
         }
-        other => other.label().to_string(),
+        other => app.t(state_label(other)).to_string(),
     }
 }
 
@@ -206,16 +232,4 @@ fn small<'a>(icon: &'static str, hint: &'a str, message: Message) -> Element<'a,
     )
     .gap(4)
     .into()
-}
-
-fn plural<'a>(count: usize, one: &'a str, few: &'a str, many: &'a str) -> &'a str {
-    let n = count % 100;
-    if (11..=14).contains(&n) {
-        return many;
-    }
-    match n % 10 {
-        1 => one,
-        2..=4 => few,
-        _ => many,
-    }
 }

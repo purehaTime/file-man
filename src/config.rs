@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::fsops::places;
 use crate::fsops::SortKey;
+use crate::i18n::{Lang, S};
+use crate::ipc::{Conflict, Naming};
 
 /// Темы, доступные в переключателе. Основной набор — Catppuccin.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -66,15 +68,23 @@ impl ThemeChoice {
     }
 }
 
-impl std::fmt::Display for ThemeChoice {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let name = match self {
+impl ThemeChoice {
+    /// Названия тем — имена собственные; переводятся только встроенные
+    /// «светлая» и «тёмная».
+    pub fn name(self, lang: Lang) -> &'static str {
+        match self {
             ThemeChoice::CatppuccinMocha => "Catppuccin Mocha",
             ThemeChoice::CatppuccinMacchiato => "Catppuccin Macchiato",
             ThemeChoice::CatppuccinFrappe => "Catppuccin Frappé",
             ThemeChoice::CatppuccinLatte => "Catppuccin Latte",
-            ThemeChoice::Dark => "Тёмная",
-            ThemeChoice::Light => "Светлая",
+            ThemeChoice::Dark => match lang {
+                Lang::En => "Dark",
+                Lang::Ru => "Тёмная",
+            },
+            ThemeChoice::Light => match lang {
+                Lang::En => "Light",
+                Lang::Ru => "Светлая",
+            },
             ThemeChoice::Nord => "Nord",
             ThemeChoice::Dracula => "Dracula",
             ThemeChoice::GruvboxDark => "Gruvbox Dark",
@@ -83,8 +93,7 @@ impl std::fmt::Display for ThemeChoice {
             ThemeChoice::KanagawaWave => "Kanagawa Wave",
             ThemeChoice::Oxocarbon => "Oxocarbon",
             ThemeChoice::Ferra => "Ferra",
-        };
-        f.write_str(name)
+        }
     }
 }
 
@@ -102,11 +111,11 @@ pub enum ViewMode {
 impl ViewMode {
     pub const ALL: [ViewMode; 3] = [ViewMode::Details, ViewMode::Compact, ViewMode::Icons];
 
-    pub fn label(self) -> &'static str {
+    pub fn label(self) -> S {
         match self {
-            ViewMode::Details => "Подробно",
-            ViewMode::Compact => "Компактно",
-            ViewMode::Icons => "Значки",
+            ViewMode::Details => S::ViewDetails,
+            ViewMode::Compact => S::ViewCompact,
+            ViewMode::Icons => S::ViewIcons,
         }
     }
 }
@@ -114,6 +123,8 @@ impl ViewMode {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
+    /// Язык интерфейса: "En" или "Ru".
+    pub lang: Lang,
     pub theme: ThemeChoice,
     pub view: ViewMode,
     pub show_hidden: bool,
@@ -126,11 +137,16 @@ pub struct Config {
     /// Пользовательские закладки для панели быстрого доступа.
     pub bookmarks: Vec<PathBuf>,
     pub last_dir: Option<PathBuf>,
+    /// Что делать при совпадении имён: "Rename", "Overwrite" или "Skip".
+    pub conflict: Conflict,
+    /// Как называть копию при конфликте имён.
+    pub naming: Naming,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
+            lang: Lang::En,
             theme: ThemeChoice::CatppuccinMocha,
             view: ViewMode::Details,
             show_hidden: false,
@@ -142,6 +158,8 @@ impl Default for Config {
             window_size: (1180.0, 720.0),
             bookmarks: Vec::new(),
             last_dir: None,
+            conflict: Conflict::Rename,
+            naming: Naming::default(),
         }
     }
 }
@@ -153,7 +171,11 @@ impl Config {
 
     pub fn load() -> Self {
         let Ok(text) = std::fs::read_to_string(Self::path()) else {
-            return Self::default();
+            // Первый запуск: кладём файл со значениями по умолчанию, чтобы
+            // язык и правила именования копий было где поправить.
+            let config = Self::default();
+            config.save();
+            return config;
         };
         serde_json::from_str(&text).unwrap_or_default()
     }

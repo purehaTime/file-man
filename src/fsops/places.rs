@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::i18n::{Lang, S};
 use crate::ipc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,24 +53,24 @@ pub fn data_dir() -> PathBuf {
 
 /// Места быстрого доступа: стандартные каталоги пользователя плюс закладки
 /// из `~/.config/gtk-3.0/bookmarks` (общий для многих менеджеров файл).
-pub fn quick_access(extra: &[PathBuf]) -> Vec<Place> {
+pub fn quick_access(lang: Lang, extra: &[PathBuf]) -> Vec<Place> {
     let home = home();
     let dirs = user_dirs();
 
     let mut places = vec![Place {
-        label: "Домашняя папка".into(),
+        label: lang.s(S::PlaceHome).into(),
         path: home.clone(),
         kind: PlaceKind::Home,
         usage: None,
     }];
 
-    let standard: [(&str, PlaceKind, &str, &str); 6] = [
-        ("XDG_DESKTOP_DIR", PlaceKind::Desktop, "Desktop", "Рабочий стол"),
-        ("XDG_DOWNLOAD_DIR", PlaceKind::Downloads, "Downloads", "Загрузки"),
-        ("XDG_DOCUMENTS_DIR", PlaceKind::Documents, "Documents", "Документы"),
-        ("XDG_PICTURES_DIR", PlaceKind::Pictures, "Pictures", "Изображения"),
-        ("XDG_MUSIC_DIR", PlaceKind::Music, "Music", "Музыка"),
-        ("XDG_VIDEOS_DIR", PlaceKind::Videos, "Videos", "Видео"),
+    let standard: [(&str, PlaceKind, &str, S); 6] = [
+        ("XDG_DESKTOP_DIR", PlaceKind::Desktop, "Desktop", S::PlaceDesktop),
+        ("XDG_DOWNLOAD_DIR", PlaceKind::Downloads, "Downloads", S::PlaceDownloads),
+        ("XDG_DOCUMENTS_DIR", PlaceKind::Documents, "Documents", S::PlaceDocuments),
+        ("XDG_PICTURES_DIR", PlaceKind::Pictures, "Pictures", S::PlacePictures),
+        ("XDG_MUSIC_DIR", PlaceKind::Music, "Music", S::PlaceMusic),
+        ("XDG_VIDEOS_DIR", PlaceKind::Videos, "Videos", S::PlaceVideos),
     ];
 
     for (key, kind, fallback, label) in standard {
@@ -81,7 +82,7 @@ pub fn quick_access(extra: &[PathBuf]) -> Vec<Place> {
 
         if path.is_dir() && path != home {
             places.push(Place {
-                label: label.into(),
+                label: lang.s(label).into(),
                 path,
                 kind,
                 usage: None,
@@ -108,7 +109,7 @@ pub fn quick_access(extra: &[PathBuf]) -> Vec<Place> {
     let trash = data_dir().join("Trash/files");
     if trash.is_dir() {
         places.push(Place {
-            label: "Корзина".into(),
+            label: lang.s(S::PlaceTrash).into(),
             path: trash,
             kind: PlaceKind::Trash,
             usage: None,
@@ -183,7 +184,7 @@ pub fn percent_decode(input: &str) -> String {
 }
 
 /// Смонтированные диски из `/proc/mounts`.
-pub fn drives() -> Vec<Place> {
+pub fn drives(lang: Lang) -> Vec<Place> {
     const SKIP_FS: &[&str] = &[
         "proc", "sysfs", "devtmpfs", "devpts", "tmpfs", "cgroup", "cgroup2", "mqueue",
         "hugetlbfs", "debugfs", "tracefs", "configfs", "securityfs", "pstore", "bpf", "autofs",
@@ -224,7 +225,7 @@ pub fn drives() -> Vec<Place> {
         let removable = is_block && is_removable(&device) || in_media;
 
         let label = if mount == "/" {
-            "Файловая система".to_string()
+            lang.s(S::PlaceRoot).to_string()
         } else {
             mount_path
                 .file_name()

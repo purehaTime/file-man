@@ -4,20 +4,20 @@ use iced::widget::{column, container, mouse_area, progress_bar, row, scrollable,
 use iced::{Center, Element, Fill, Length};
 
 use super::{icons, style, App, Message};
-use crate::fsops::entry::format_size;
 use crate::fsops::Place;
+use crate::i18n::S;
 
 pub fn view(app: &App) -> Element<'_, Message> {
     let mut content = column![].spacing(2).padding([8, 8]);
 
-    content = content.push(heading("Быстрый доступ"));
+    content = content.push(heading(app.t(S::QuickAccess)));
     for (index, place) in app.quick.iter().enumerate() {
         content = content.push(item(app, place, index));
     }
 
     if !app.drives.is_empty() {
         content = content.push(space().height(10));
-        content = content.push(heading("Устройства"));
+        content = content.push(heading(app.t(S::Devices)));
 
         let offset = app.quick.len();
         for (index, place) in app.drives.iter().enumerate() {
@@ -77,7 +77,7 @@ fn item<'a>(app: &'a App, place: &'a Place, index: usize) -> Element<'a, Message
                                 },
                             }
                         }),
-                    text(format!("{} свободно", format_size(free)))
+                    text(app.lang().free_space(free))
                         .size(10)
                         .style(style::muted),
                 ]

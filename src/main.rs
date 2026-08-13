@@ -6,6 +6,7 @@
 
 mod config;
 mod fsops;
+mod i18n;
 mod ipc;
 mod jobs;
 mod ui;

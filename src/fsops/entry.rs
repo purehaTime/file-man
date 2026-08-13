@@ -8,6 +8,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+use crate::i18n::S;
+
 /// Тип содержимого — нужен для выбора иконки и сортировки по типу.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Kind {
@@ -25,19 +27,19 @@ pub enum Kind {
 }
 
 impl Kind {
-    pub fn label(self) -> &'static str {
+    pub fn label(self) -> S {
         match self {
-            Kind::Folder => "Папка",
-            Kind::Image => "Изображение",
-            Kind::Video => "Видео",
-            Kind::Audio => "Аудио",
-            Kind::Archive => "Архив",
-            Kind::Code => "Исходный код",
-            Kind::Document => "Документ",
-            Kind::Pdf => "PDF",
-            Kind::Text => "Текст",
-            Kind::Executable => "Программа",
-            Kind::Unknown => "Файл",
+            Kind::Folder => S::KindFolder,
+            Kind::Image => S::KindImage,
+            Kind::Video => S::KindVideo,
+            Kind::Audio => S::KindAudio,
+            Kind::Archive => S::KindArchive,
+            Kind::Code => S::KindCode,
+            Kind::Document => S::KindDocument,
+            Kind::Pdf => S::KindPdf,
+            Kind::Text => S::KindText,
+            Kind::Executable => S::KindExecutable,
+            Kind::Unknown => S::KindUnknown,
         }
     }
 
@@ -198,12 +200,12 @@ pub enum SortKey {
 }
 
 impl SortKey {
-    pub fn label(self) -> &'static str {
+    pub fn label(self) -> S {
         match self {
-            SortKey::Name => "Имя",
-            SortKey::Size => "Размер",
-            SortKey::Modified => "Изменён",
-            SortKey::Kind => "Тип",
+            SortKey::Name => S::ColumnName,
+            SortKey::Size => S::ColumnSize,
+            SortKey::Modified => S::ColumnModified,
+            SortKey::Kind => S::ColumnKind,
         }
     }
 }
@@ -286,29 +288,6 @@ fn take_number(iter: &mut std::iter::Peekable<std::str::Chars>) -> u128 {
     value
 }
 
-/// «1,4 ГБ», «376 КБ», «12 Б».
-pub fn format_size(bytes: u64) -> String {
-    const UNITS: [&str; 5] = ["Б", "КБ", "МБ", "ГБ", "ТБ"];
-    if bytes < 1024 {
-        return format!("{bytes} Б");
-    }
-
-    let mut value = bytes as f64;
-    let mut unit = 0;
-    while value >= 1024.0 && unit < UNITS.len() - 1 {
-        value /= 1024.0;
-        unit += 1;
-    }
-
-    let text = if value < 10.0 {
-        format!("{value:.1}")
-    } else {
-        format!("{value:.0}")
-    };
-
-    format!("{} {}", text.replace('.', ","), UNITS[unit])
-}
-
 /// Локальное время в виде `2026-08-12 16:24`.
 pub fn format_time(time: SystemTime) -> String {
     let Ok(elapsed) = time.duration_since(UNIX_EPOCH) else {
@@ -330,15 +309,4 @@ pub fn format_time(time: SystemTime) -> String {
         tm.tm_hour,
         tm.tm_min
     )
-}
-
-/// Длительность в «2 мин 5 с» для оценки времени копирования.
-pub fn format_duration(secs: u64) -> String {
-    if secs < 60 {
-        format!("{secs} с")
-    } else if secs < 3600 {
-        format!("{} мин {} с", secs / 60, secs % 60)
-    } else {
-        format!("{} ч {} мин", secs / 3600, (secs % 3600) / 60)
-    }
 }

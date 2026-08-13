@@ -23,22 +23,51 @@ pub enum Op {
     Move,
 }
 
-impl Op {
-    pub fn verb(self) -> &'static str {
-        match self {
-            Op::Copy => "Копирование",
-            Op::Move => "Перемещение",
+/// Что делать, если файл с таким именем уже есть в приёмнике.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum Conflict {
+    /// Дать копии новое имя по шаблону [`Naming`].
+    #[default]
+    Rename,
+    Overwrite,
+    Skip,
+}
+
+/// Как называть копию при совпадении имён. Настраивается в конфиге:
+/// шаблон понимает `{name}` (имя без расширения), `{n}` (номер) и `{ext}`
+/// (расширение вместе с точкой).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Naming {
+    pub template: String,
+    /// С какого числа начинать нумерацию.
+    pub start: u32,
+}
+
+impl Default for Naming {
+    fn default() -> Self {
+        Self {
+            template: "{name} ({n}){ext}".into(),
+            start: 1,
         }
     }
 }
 
-/// Что делать, если файл с таким именем уже есть в приёмнике.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Conflict {
-    /// Дописать к имени ` (2)`, ` (3)`, …
-    Rename,
-    Overwrite,
-    Skip,
+impl Naming {
+    /// Подставляет части имени в шаблон.
+    pub fn render(&self, stem: &str, n: u32, ext: &str) -> String {
+        let rendered = self
+            .template
+            .replace("{name}", stem)
+            .replace("{n}", &n.to_string())
+            .replace("{ext}", ext);
+
+        // Шаблон без `{n}` не даёт уникальности — откатываемся к обычному виду.
+        if self.template.contains("{n}") && !rendered.is_empty() {
+            rendered
+        } else {
+            format!("{stem} ({n}){ext}")
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -55,17 +84,6 @@ pub enum JobState {
 impl JobState {
     pub fn is_active(&self) -> bool {
         matches!(self, JobState::Scanning | JobState::Running | JobState::Paused)
-    }
-
-    pub fn label(&self) -> &'static str {
-        match self {
-            JobState::Scanning => "подсчёт",
-            JobState::Running => "выполняется",
-            JobState::Paused => "пауза",
-            JobState::Done => "готово",
-            JobState::Cancelled => "отменено",
-            JobState::Failed(_) => "ошибка",
-        }
     }
 }
 
@@ -102,24 +120,21 @@ impl Job {
         (self.done_bytes as f32 / self.total_bytes as f32).clamp(0.0, 1.0)
     }
 
-    /// Короткое имя для статусной строки: «Копирование → Загрузки».
-    pub fn title(&self) -> String {
-        let dest = self
-            .dest
+    /// Имя приёмника без пути — для короткой подписи в интерфейсе.
+    pub fn dest_name(&self) -> String {
+        self.dest
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| self.dest.display().to_string());
+            .unwrap_or_else(|| self.dest.display().to_string())
+    }
 
-        match self.sources.len() {
-            1 => {
-                let src = self.sources[0]
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                format!("{} «{}» → {}", self.op.verb(), src, dest)
-            }
-            n => format!("{} {} об. → {}", self.op.verb(), n, dest),
-        }
+    /// Имя первого источника без пути.
+    pub fn source_name(&self) -> String {
+        self.sources
+            .first()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default()
     }
 }
 
@@ -134,7 +149,10 @@ pub enum Request {
         op: Op,
         sources: Vec<PathBuf>,
         dest: PathBuf,
+        #[serde(default)]
         conflict: Conflict,
+        #[serde(default)]
+        naming: Naming,
     },
     Cancel(u64),
     Pause(u64),

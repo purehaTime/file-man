@@ -2,37 +2,39 @@
 
 use std::path::{Component, PathBuf};
 
-use iced::widget::{
-    button, container, pick_list, row, scrollable, space, text, text_input, tooltip,
-};
+use iced::widget::{button, container, row, scrollable, space, text, text_input, tooltip};
 use iced::{Center, Element, Fill, Length, Shrink};
 
 use super::{icons, style, App, Message, FILTER_ID, PATH_ID};
-use crate::config::{ThemeChoice, ViewMode};
+use crate::config::ViewMode;
+use crate::i18n::S;
+
+/// Высота панели инструментов — по ней позиционируется всплывающее меню тем.
+pub const HEIGHT: f32 = 44.0;
 
 pub fn view(app: &App) -> Element<'_, Message> {
     let navigation = row![
         tool(
             icons::ARROW_LEFT,
-            "Назад (Alt+←)",
+            app.t(S::Back),
             (app.history_pos > 0).then_some(Message::Back),
         ),
         tool(
             icons::ARROW_RIGHT,
-            "Вперёд (Alt+→)",
+            app.t(S::Forward),
             (app.history_pos + 1 < app.history.len()).then_some(Message::Forward),
         ),
         tool(
             icons::ARROW_UP,
-            "Наверх (Backspace)",
+            app.t(S::Up),
             app.dir.parent().map(|_| Message::Up),
         ),
-        tool(icons::REFRESH, "Обновить (F5)", Some(Message::Refresh)),
+        tool(icons::REFRESH, app.t(S::Refresh), Some(Message::Refresh)),
     ]
     .spacing(2);
 
     let location: Element<'_, Message> = match &app.path_edit {
-        Some(value) => text_input("/путь/к/папке", value)
+        Some(value) => text_input(app.t(S::PathPlaceholder), value)
             .id(PATH_ID)
             .on_input(Message::PathEditChanged)
             .on_submit(Message::PathEditSubmit)
@@ -47,23 +49,23 @@ pub fn view(app: &App) -> Element<'_, Message> {
     let mut controls = row![
         toggle(
             icons::FOLDER_PLUS,
-            "Создать папку (Ctrl+N)",
+            app.t(S::NewFolderHint),
             false,
             Message::RequestNewFolder,
         ),
         toggle(
             icons::CHECK,
             if app.is_bookmarked() {
-                "Убрать из быстрого доступа (Ctrl+D)"
+                app.t(S::BookmarkRemove)
             } else {
-                "В быстрый доступ (Ctrl+D)"
+                app.t(S::BookmarkAdd)
             },
             app.is_bookmarked(),
             Message::ToggleBookmark,
         ),
         toggle(
             icons::SEARCH,
-            "Фильтр по имени (Ctrl+F)",
+            app.t(S::FilterHint),
             app.filter_visible,
             Message::ToggleFilter,
         ),
@@ -73,7 +75,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
             } else {
                 icons::EYE_OFF
             },
-            "Скрытые файлы (Ctrl+H)",
+            app.t(S::HiddenHint),
             app.config.show_hidden,
             Message::ToggleHidden,
         ),
@@ -91,44 +93,39 @@ pub fn view(app: &App) -> Element<'_, Message> {
         };
         controls = controls.push(toggle(
             icon,
-            mode.label(),
+            app.t(mode.label()),
             app.config.view == mode,
             Message::SetView(mode),
         ));
     }
 
-    let themes = pick_list(
-        ThemeChoice::ALL,
-        Some(app.config.theme),
-        Message::SetTheme,
-    )
-    .text_size(13)
-    .padding([5, 8])
-    .width(Length::Fixed(190.0));
+    // Тема выбирается во всплывающей панели — в строке только иконка.
+    controls = controls.push(space().width(6)).push(toggle(
+        icons::PALETTE,
+        app.t(S::ThemeHint),
+        app.theme_menu,
+        Message::ToggleThemeMenu,
+    ));
 
-    let bar = row![
-        navigation,
-        location,
-        controls,
-        icons::view(icons::PALETTE, 16),
-        themes,
-    ]
-    .spacing(8)
-    .align_y(Center)
-    .padding([6, 8]);
+    let bar = row![navigation, location, controls]
+        .spacing(8)
+        .align_y(Center)
+        .padding([6, 8]);
 
-    let mut column = iced::widget::column![container(bar).style(style::chrome)];
+    let mut column = iced::widget::column![container(bar)
+        .height(Length::Fixed(HEIGHT))
+        .style(style::chrome)];
 
     if app.filter_visible {
         let field = row![
             icons::view(icons::SEARCH, 15),
-            text_input("Фильтр по имени…", &app.filter)
+            text_input(app.t(S::FilterPlaceholder), &app.filter)
                 .id(FILTER_ID)
                 .on_input(Message::FilterChanged)
                 .padding([5, 9])
                 .size(13)
                 .style(style::input),
-            text(format!("{} совпадений", app.filtered.len()))
+            text(app.config.lang.matches(app.filtered.len()))
                 .size(12)
                 .style(style::muted),
         ]

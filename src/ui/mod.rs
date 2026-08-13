@@ -21,7 +21,8 @@ use iced::{Element, Fill, Point, Size, Subscription, Task, Theme};
 use crate::config::{Config, ThemeChoice, ViewMode};
 use crate::fsops::entry::{self, Entry, SortKey};
 use crate::fsops::{ops, places, Place};
-use crate::ipc::{self, Conflict, Job, Op, Request, Response};
+use crate::i18n::{Lang, S};
+use crate::ipc::{self, Job, Op, Request, Response};
 
 /// Высота строки в режимах «Подробно» и «Компактно» — нужна для прокрутки
 /// к выделенному элементу.
@@ -109,6 +110,7 @@ pub enum Message {
     SetView(ViewMode),
     SetSort(SortKey),
     SetTheme(ThemeChoice),
+    ToggleThemeMenu,
     ToggleHidden,
     ToggleFilter,
     FilterChanged(String),
@@ -170,6 +172,8 @@ pub struct App {
 
     pub modal: Option<Modal>,
     pub context: Option<Context>,
+    /// Открыта ли всплывающая панель выбора темы.
+    pub theme_menu: bool,
 
     pub modifiers: Modifiers,
     pub cursor: Point,
@@ -198,8 +202,8 @@ pub fn boot() -> (App, Task<Message>) {
     let show_hidden = config.show_hidden;
 
     let app = App {
-        quick: places::quick_access(&config.bookmarks),
-        drives: places::drives(),
+        quick: places::quick_access(config.lang, &config.bookmarks),
+        drives: places::drives(config.lang),
         theme,
         dir: start.clone(),
         entries: Vec::new(),
@@ -221,6 +225,7 @@ pub fn boot() -> (App, Task<Message>) {
         path_edit: None,
         modal: None,
         context: None,
+        theme_menu: false,
         modifiers: Modifiers::default(),
         cursor: Point::ORIGIN,
         window,
@@ -237,7 +242,7 @@ pub fn title(app: &App) -> String {
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| app.dir.display().to_string());
 
-    format!("{name} — Файловый менеджер")
+    app.config.lang.window_title(&name)
 }
 
 pub fn theme(app: &App) -> Theme {
@@ -389,8 +394,8 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             }
         }
         Message::Refresh => {
-            app.quick = places::quick_access(&app.config.bookmarks);
-            app.drives = places::drives();
+            app.quick = places::quick_access(app.config.lang, &app.config.bookmarks);
+            app.drives = places::drives(app.config.lang);
             app.reload(None)
         }
 
@@ -469,8 +474,11 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             };
             if !ops::is_writable(&app.dir) {
                 app.modal = Some(Modal::Error {
-                    title: "Не удалось вставить".into(),
-                    message: format!("Нет прав на запись в «{}»", app.dir.display()),
+                    title: app.t(S::ErrPasteTitle).into(),
+                    message: app
+                        .config
+                        .lang
+                        .no_write_access(&app.dir.display().to_string()),
                 });
                 return Task::none();
             }
@@ -482,7 +490,8 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                 op,
                 sources,
                 dest: app.dir.clone(),
-                conflict: Conflict::Rename,
+                conflict: app.config.conflict,
+                naming: app.config.naming.clone(),
             })
         }
 
@@ -496,7 +505,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                 for path in &paths {
                     if let Err(err) = ops::open_external(path) {
                         app.modal = Some(Modal::Error {
-                            title: "Не удалось открыть".into(),
+                            title: app.t(S::ErrOpenTitle).into(),
                             message: err.to_string(),
                         });
                         break;
@@ -521,14 +530,14 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::RequestNewFolder => {
             app.context = None;
             app.modal = Some(Modal::NewFolder {
-                value: "Новая папка".into(),
+                value: app.t(S::NewFolderDefault).into(),
             });
             iced::widget::operation::focus(DIALOG_ID)
         }
         Message::RequestNewFile => {
             app.context = None;
             app.modal = Some(Modal::NewFile {
-                value: "Новый файл".into(),
+                value: app.t(S::NewFileDefault).into(),
             });
             iced::widget::operation::focus(DIALOG_ID)
         }
@@ -572,7 +581,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                 }
                 Err(message) => {
                     app.modal = Some(Modal::Error {
-                        title: "Операция не выполнена".into(),
+                        title: app.t(S::ErrOperation).into(),
                         message,
                     });
                 }
@@ -622,7 +631,13 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::SetTheme(choice) => {
             app.config.theme = choice;
             app.theme = choice.theme();
+            app.theme_menu = false;
             app.config.save();
+            Task::none()
+        }
+        Message::ToggleThemeMenu => {
+            app.theme_menu = !app.theme_menu;
+            app.context = None;
             Task::none()
         }
         Message::ToggleHidden => {
@@ -667,7 +682,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                 return app.navigate(expanded);
             }
             app.modal = Some(Modal::Error {
-                title: "Путь не найден".into(),
+                title: app.t(S::ErrPathNotFound).into(),
                 message: raw,
             });
             Task::none()
@@ -685,7 +700,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                 app.config.bookmarks.push(dir);
             }
             app.config.save();
-            app.quick = places::quick_access(&app.config.bookmarks);
+            app.quick = places::quick_access(app.config.lang, &app.config.bookmarks);
             Task::none()
         }
 
@@ -711,7 +726,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
         }
         Message::KeyPressed(key, modifiers) => app.handle_key(key, modifiers),
         Message::RefreshDrives => {
-            app.drives = places::drives();
+            app.drives = places::drives(app.config.lang);
             app.usage = ipc::disk_usage(&app.dir);
             Task::none()
         }
@@ -734,6 +749,10 @@ pub fn view(app: &App) -> Element<'_, Message> {
         .style(style::panel);
 
     let mut layers = stack![base];
+
+    if app.theme_menu {
+        layers = layers.push(dialogs::theme_menu(app));
+    }
 
     if let Some(context) = &app.context {
         layers = layers.push(dialogs::context_menu(app, context));
@@ -759,6 +778,15 @@ pub fn view(app: &App) -> Element<'_, Message> {
 // ------------------------------------------------------------------ помощь
 
 impl App {
+    pub fn lang(&self) -> Lang {
+        self.config.lang
+    }
+
+    /// Короткий доступ к переводу строки.
+    pub fn t(&self, key: S) -> &'static str {
+        self.config.lang.s(key)
+    }
+
     pub fn entry_at(&self, index: usize) -> Option<&Entry> {
         self.filtered.get(index).and_then(|&i| self.entries.get(i))
     }
@@ -907,7 +935,7 @@ impl App {
 
         if let Err(err) = ops::open_external(&entry.path) {
             self.modal = Some(Modal::Error {
-                title: "Не удалось открыть".into(),
+                title: self.config.lang.s(S::ErrOpenTitle).into(),
                 message: err.to_string(),
             });
         }
@@ -997,7 +1025,7 @@ impl App {
             JobEvent::Message(Response::Accepted { .. }) => {}
             JobEvent::Message(Response::Error { message }) => {
                 self.modal = Some(Modal::Error {
-                    title: "Ошибка фоновой задачи".into(),
+                    title: self.config.lang.s(S::ErrJob).into(),
                     message,
                 });
             }
@@ -1019,9 +1047,10 @@ impl App {
             };
         }
 
-        if self.context.is_some() {
+        if self.context.is_some() || self.theme_menu {
             if let Key::Named(Named::Escape) = key {
                 self.context = None;
+                self.theme_menu = false;
                 return Task::none();
             }
         }
