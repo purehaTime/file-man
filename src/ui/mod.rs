@@ -3,6 +3,7 @@
 pub mod dialogs;
 pub mod icons;
 pub mod panel;
+pub mod selection;
 pub mod sidebar;
 pub mod statusbar;
 pub mod style;
@@ -16,7 +17,7 @@ use std::time::Duration;
 use iced::futures::StreamExt;
 use iced::keyboard::{key::Named, Key, Modifiers};
 use iced::widget::{container, mouse_area, opaque, pin, stack};
-use iced::{Element, Fill, Point, Size, Subscription, Task, Theme};
+use iced::{Element, Fill, Point, Rectangle, Size, Subscription, Task, Theme};
 
 use crate::config::{Config, ThemeChoice, ViewMode};
 use crate::fsops::entry::{self, Entry, SortKey};
@@ -27,6 +28,12 @@ use crate::ipc::{self, Job, Op, Request, Response};
 /// Высота строки в режимах «Подробно» и «Компактно» — нужна для прокрутки
 /// к выделенному элементу.
 pub const ROW_HEIGHT: f32 = 30.0;
+/// Высота статусной строки вместе с разделителем.
+const STATUS_HEIGHT: f32 = 31.0;
+/// Высота строки фильтра, когда она показана.
+const FILTER_HEIGHT: f32 = 37.0;
+/// Высота шапки таблицы в режиме «Подробно».
+const HEADER_HEIGHT: f32 = 31.0;
 pub const LIST_ID: &str = "file-list";
 pub const FILTER_ID: &str = "filter-input";
 pub const PATH_ID: &str = "path-input";
@@ -42,6 +49,38 @@ pub enum Modal {
     Properties { entry: Entry, contents: Option<usize> },
     Jobs,
     Error { title: String, message: String },
+}
+
+/// Рамка выделения. Появляется, когда мышь потянули с пустого места;
+/// координаты — в пространстве содержимого, то есть с учётом прокрутки.
+#[derive(Debug, Clone)]
+pub struct Marquee {
+    /// Задаётся на первом движении мыши после нажатия.
+    pub origin: Option<Point>,
+    pub current: Point,
+    /// Что было выделено до протяжки: с Ctrl рамка дополняет это множество,
+    /// без него оно пустое и выделение заменяется.
+    pub base: HashSet<PathBuf>,
+}
+
+impl Marquee {
+    /// Прямоугольник рамки; `None`, пока это просто клик без протяжки.
+    pub fn area(&self) -> Option<Rectangle> {
+        let origin = self.origin?;
+
+        let width = (origin.x - self.current.x).abs();
+        let height = (origin.y - self.current.y).abs();
+        if width < 3.0 && height < 3.0 {
+            return None;
+        }
+
+        Some(Rectangle {
+            x: origin.x.min(self.current.x),
+            y: origin.y.min(self.current.y),
+            width,
+            height,
+        })
+    }
 }
 
 /// Контекстное меню: по элементу списка или по пустому месту.
@@ -86,6 +125,12 @@ pub enum Message {
     EmptyPressed,
     EmptyRightPressed,
     SelectAll,
+    /// Нажатие на пустом месте списка — начало возможной рамки.
+    PanelPressed,
+    /// Движение мыши в списке, координаты относительно видимой области.
+    PanelMoved(Point),
+    PanelReleased,
+    Scrolled(f32),
 
     // буфер обмена и операции
     CopySelection,
@@ -151,10 +196,12 @@ pub struct App {
     pub usage: Option<(u64, u64)>,
     pub loading: bool,
 
-    pub selection: HashSet<PathBuf>,
-    pub anchor: Option<usize>,
+    pub selection: selection::State,
     pub hover: Option<usize>,
     pub hover_place: Option<usize>,
+    pub marquee: Option<Marquee>,
+    /// Текущая вертикальная прокрутка списка.
+    pub scroll: f32,
 
     pub history: Vec<PathBuf>,
     pub history_pos: usize,
@@ -211,10 +258,11 @@ pub fn boot() -> (App, Task<Message>) {
         read_error: None,
         usage: None,
         loading: true,
-        selection: HashSet::new(),
-        anchor: None,
+        selection: selection::State::default(),
         hover: None,
         hover_place: None,
+        marquee: None,
+        scroll: 0.0,
         history: vec![start.clone()],
         history_pos: 0,
         clipboard: None,
@@ -348,6 +396,11 @@ fn events_subscription() -> Subscription<Message> {
         iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
             Some(Message::CursorMoved(position))
         }
+        // Кнопку могли отпустить, уведя курсор за пределы списка, — рамку
+        // всё равно нужно завершить.
+        iced::Event::Mouse(iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left)) => {
+            Some(Message::PanelReleased)
+        }
         iced::Event::Window(iced::window::Event::Resized(size)) => {
             Some(Message::WindowResized(size))
         }
@@ -387,7 +440,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                     let parent = parent.to_path_buf();
                     let task = app.navigate(parent);
                     // Возврат наверх удобнее с выделенным исходным каталогом.
-                    app.selection = HashSet::from([current]);
+                    app.selection.select_only(current);
                     task
                 }
                 None => Task::none(),
@@ -406,6 +459,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
 
         Message::RowPressed(index) => {
             app.context = None;
+            app.theme_menu = false;
             app.press_row(index);
             Task::none()
         }
@@ -416,9 +470,10 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::RowRightPressed(index) => {
             if let Some(entry) = app.entry_at(index) {
                 let path = entry.path.clone();
+                // По правой кнопке выделяем элемент, только если он ещё не
+                // входит в выделение — иначе групповое меню теряет смысл.
                 if !app.selection.contains(&path) {
-                    app.selection = HashSet::from([path.clone()]);
-                    app.anchor = Some(index);
+                    app.focus_index(index, false);
                 }
                 app.context = Some(Context {
                     position: app.cursor,
@@ -429,11 +484,12 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
         }
         Message::EmptyPressed => {
             app.context = None;
+            app.theme_menu = false;
             app.selection.clear();
-            app.anchor = None;
             Task::none()
         }
         Message::EmptyRightPressed => {
+            app.marquee = None;
             app.selection.clear();
             app.context = Some(Context {
                 position: app.cursor,
@@ -442,12 +498,59 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::SelectAll => {
-            app.selection = app
+            let paths: Vec<PathBuf> = app
                 .filtered
                 .iter()
                 .filter_map(|&i| app.entries.get(i))
                 .map(|e| e.path.clone())
                 .collect();
+            app.selection.select_all(paths);
+            Task::none()
+        }
+
+        Message::PanelPressed => {
+            app.context = None;
+            app.theme_menu = false;
+
+            // С Ctrl (или Shift) рамка дополняет выделение, иначе заменяет.
+            let additive = app.modifiers.control() || app.modifiers.shift();
+            let base: HashSet<PathBuf> = if additive {
+                app.selection.iter().cloned().collect()
+            } else {
+                app.selection.clear();
+                HashSet::new()
+            };
+
+            app.marquee = Some(Marquee {
+                origin: None,
+                current: Point::ORIGIN,
+                base,
+            });
+            Task::none()
+        }
+        Message::PanelMoved(position) => {
+            // Координаты приходят относительно видимой области, а рамка живёт
+            // в координатах содержимого.
+            let scroll = app.scroll;
+            let Some(marquee) = app.marquee.as_mut() else {
+                return Task::none();
+            };
+
+            let point = Point::new(position.x, position.y + scroll);
+            if marquee.origin.is_none() {
+                marquee.origin = Some(point);
+            }
+            marquee.current = point;
+
+            app.apply_marquee();
+            Task::none()
+        }
+        Message::PanelReleased => {
+            app.marquee = None;
+            Task::none()
+        }
+        Message::Scrolled(offset) => {
+            app.scroll = offset;
             Task::none()
         }
 
@@ -836,6 +939,7 @@ impl App {
     fn reload(&mut self, select: Option<PathBuf>) -> Task<Message> {
         self.loading = true;
         self.context = None;
+        self.marquee = None;
         self.filter.clear();
         self.filter_visible = false;
         self.path_edit = None;
@@ -843,7 +947,15 @@ impl App {
         self.config.last_dir = Some(self.dir.clone());
         self.config.save();
 
-        load(self.dir.clone(), self.config.show_hidden, select)
+        // Новый каталог показываем с начала списка.
+        self.scroll = 0.0;
+        Task::batch([
+            iced::widget::operation::scroll_to(
+                LIST_ID,
+                iced::widget::operation::AbsoluteOffset { x: 0.0, y: 0.0 },
+            ),
+            load(self.dir.clone(), self.config.show_hidden, select),
+        ])
     }
 
     fn apply_load(&mut self, result: LoadResult) {
@@ -861,11 +973,11 @@ impl App {
 
         // Оставляем выделенным только то, что всё ещё существует.
         let alive: HashSet<PathBuf> = self.entries.iter().map(|e| e.path.clone()).collect();
-        self.selection.retain(|p| alive.contains(p));
+        self.selection.retain_existing(&alive);
 
         if let Some(path) = result.select {
             if alive.contains(&path) {
-                self.selection = HashSet::from([path]);
+                self.selection.select_only(path);
             }
         }
     }
@@ -890,37 +1002,42 @@ impl App {
             .filter(|(_, e)| needle.is_empty() || e.name.to_lowercase().contains(&needle))
             .map(|(i, _)| i)
             .collect();
-
-        self.anchor = None;
     }
 
     fn press_row(&mut self, index: usize) {
-        let Some(entry) = self.entry_at(index) else {
+        let ctrl = self.modifiers.control();
+        let shift = self.modifiers.shift();
+
+        let Self {
+            selection,
+            entries,
+            filtered,
+            ..
+        } = self;
+
+        selection.click(index, ctrl, shift, |i| path_at(entries, filtered, i));
+    }
+
+    /// Пересчитать выделение под текущую рамку.
+    fn apply_marquee(&mut self) {
+        let Some(marquee) = self.marquee.take() else {
             return;
         };
-        let path = entry.path.clone();
 
-        if self.modifiers.control() {
-            if !self.selection.remove(&path) {
-                self.selection.insert(path);
-            }
-            self.anchor = Some(index);
-        } else if self.modifiers.shift() {
-            let anchor = self.anchor.unwrap_or(index);
-            let (from, to) = if anchor <= index {
-                (anchor, index)
-            } else {
-                (index, anchor)
-            };
+        if let Some(area) = marquee.area() {
+            let hits = panel::Geometry::of(self).hits(area, self.filtered.len());
 
-            self.selection = (from..=to)
-                .filter_map(|i| self.entry_at(i))
-                .map(|e| e.path.clone())
-                .collect();
-        } else {
-            self.selection = HashSet::from([path]);
-            self.anchor = Some(index);
+            let Self {
+                selection,
+                entries,
+                filtered,
+                ..
+            } = self;
+
+            selection.apply_marquee(&marquee.base, &hits, |i| path_at(entries, filtered, i));
         }
+
+        self.marquee = Some(marquee);
     }
 
     fn activate(&mut self, index: usize) -> Task<Message> {
@@ -1057,6 +1174,7 @@ impl App {
 
         match key {
             Key::Named(Named::Escape) => {
+                self.marquee = None;
                 if self.filter_visible {
                     self.filter_visible = false;
                     self.filter.clear();
@@ -1076,13 +1194,15 @@ impl App {
                     permanent: modifiers.shift(),
                 },
             ),
-            Key::Named(Named::ArrowUp) => self.move_cursor(-1),
-            Key::Named(Named::ArrowDown) => self.move_cursor(1),
+            Key::Named(Named::ArrowUp) => self.move_cursor(-1, modifiers.shift()),
+            Key::Named(Named::ArrowDown) => self.move_cursor(1, modifiers.shift()),
             Key::Named(Named::ArrowLeft) if modifiers.alt() => update(self, Message::Back),
             Key::Named(Named::ArrowRight) if modifiers.alt() => update(self, Message::Forward),
-            Key::Named(Named::Home) if !self.filtered.is_empty() => self.select_index(0),
+            Key::Named(Named::Home) if !self.filtered.is_empty() => {
+                self.select_index(0, modifiers.shift())
+            }
             Key::Named(Named::End) if !self.filtered.is_empty() => {
-                self.select_index(self.filtered.len() - 1)
+                self.select_index(self.filtered.len() - 1, modifiers.shift())
             }
             Key::Character(c) if modifiers.control() => match c.as_str() {
                 "c" => update(self, Message::CopySelection),
@@ -1103,45 +1223,80 @@ impl App {
         }
     }
 
-    fn move_cursor(&mut self, delta: isize) -> Task<Message> {
+    fn move_cursor(&mut self, delta: isize, extend: bool) -> Task<Message> {
         if self.filtered.is_empty() {
             return Task::none();
         }
 
-        let current = self
-            .selection
-            .iter()
-            .next()
-            .and_then(|path| {
-                self.visible_entries()
-                    .find(|(_, e)| e.path == *path)
-                    .map(|(pos, _)| pos as isize)
-            })
-            .unwrap_or(-1);
+        let last = self.filtered.len() as isize - 1;
+        let current = self.selection.focus().map(|f| f as isize).unwrap_or(-1);
+        let next = (current + delta).clamp(0, last) as usize;
 
-        let next = (current + delta).clamp(0, self.filtered.len() as isize - 1) as usize;
-        self.select_index(next)
+        self.select_index(next, extend)
     }
 
-    fn select_index(&mut self, index: usize) -> Task<Message> {
-        let Some(entry) = self.entry_at(index) else {
+    fn select_index(&mut self, index: usize, extend: bool) -> Task<Message> {
+        self.focus_index(index, extend);
+        self.scroll_into_view(index)
+    }
+
+    /// Выделить элемент без прокрутки списка.
+    fn focus_index(&mut self, index: usize, extend: bool) {
+        if index >= self.filtered.len() {
+            return;
+        }
+
+        let Self {
+            selection,
+            entries,
+            filtered,
+            ..
+        } = self;
+
+        selection.move_focus(index, extend, |i| path_at(entries, filtered, i));
+    }
+
+    /// Довернуть список так, чтобы элемент оказался в видимой области.
+    fn scroll_into_view(&self, index: usize) -> Task<Message> {
+        let cell = panel::Geometry::of(self).rect(index);
+        let viewport = self.list_height();
+
+        let top = (cell.y - panel::PAD_Y).max(0.0);
+        let bottom = cell.y + cell.height + panel::PAD_Y;
+
+        let offset = if top < self.scroll {
+            top
+        } else if bottom > self.scroll + viewport {
+            (bottom - viewport).max(0.0)
+        } else {
             return Task::none();
         };
 
-        self.selection = HashSet::from([entry.path.clone()]);
-        self.anchor = Some(index);
-
-        // Прокрутка к элементу имеет смысл только у списков с фиксированной строкой.
-        if self.config.view == ViewMode::Details {
-            let offset = (index as f32 * ROW_HEIGHT - self.window.height / 3.0).max(0.0);
-            return iced::widget::operation::scroll_to(
-                LIST_ID,
-                iced::widget::operation::AbsoluteOffset { x: 0.0, y: offset },
-            );
-        }
-
-        Task::none()
+        iced::widget::operation::scroll_to(
+            LIST_ID,
+            iced::widget::operation::AbsoluteOffset { x: 0.0, y: offset },
+        )
     }
+
+    /// Высота видимой части списка — панели инструментов и статуса вычитаются.
+    fn list_height(&self) -> f32 {
+        let mut height = self.window.height - toolbar::HEIGHT - STATUS_HEIGHT;
+        if self.filter_visible {
+            height -= FILTER_HEIGHT;
+        }
+        if self.config.view == ViewMode::Details {
+            height -= HEADER_HEIGHT;
+        }
+        height.max(120.0)
+    }
+}
+
+/// Путь видимого элемента по его порядковому номеру.
+fn path_at(entries: &[Entry], filtered: &[usize], index: usize) -> Option<PathBuf> {
+    filtered
+        .get(index)
+        .and_then(|&i| entries.get(i))
+        .map(|entry| entry.path.clone())
 }
 
 // ------------------------------------------------------------------ задачи
